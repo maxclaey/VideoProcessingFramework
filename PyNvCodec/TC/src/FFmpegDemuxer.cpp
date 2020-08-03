@@ -15,6 +15,9 @@
 #include "NvCodecUtils.h"
 #include "libavutil/avstring.h"
 #include "libavutil/avutil.h"
+extern "C" {
+  #include "ffmpeg_rtsp.h"
+}
 #include <iostream>
 #include <limits>
 #include <sstream>
@@ -63,6 +66,26 @@ uint32_t FFmpegDemuxer::GetHeight() const { return height; }
 double FFmpegDemuxer::GetFramerate() const { return framerate; }
 
 double FFmpegDemuxer::GetTimebase() const { return timebase; }
+
+double FFmpegDemuxer::GetNTPTime(void *priv_data) const {
+  RTSPState* rtsp_state = (RTSPState*) priv_data;
+  RTSPStream* rtsp_stream = rtsp_state->rtsp_streams[0];
+  RTPDemuxContext* rtp_demux_context = (RTPDemuxContext*) rtsp_stream->transport_priv;
+
+  if ((rtp_demux_context->last_rtcp_ntp_time >> 32) < 2208988800) {
+    return 0;
+  }
+
+  uint32_t seconds = (rtp_demux_context->last_rtcp_ntp_time >> 32) - 2208988800;
+  uint32_t fraction = rtp_demux_context->last_rtcp_ntp_time & 0xffffffff;
+  double useconds = (double) fraction / 0xffffffff;
+  double last_ntp = seconds + useconds;
+
+  int32_t ts_diff = rtp_demux_context->timestamp - rtp_demux_context->last_rtcp_timestamp;
+  AVRational time_base = rtp_demux_context->st->time_base;
+
+  return last_ntp + (ts_diff * (time_base.num / (double) time_base.den));
+}
 
 uint32_t FFmpegDemuxer::GetVideoStreamIndex() const { return videoStream; }
 
@@ -133,6 +156,7 @@ bool FFmpegDemuxer::Demux(uint8_t *&pVideo, size_t &rVideoBytes) {
   lastPacketData.duration = pktFiltered.duration;
   lastPacketData.pos = pktFiltered.pos;
   lastPacketData.pts = pktFiltered.pts;
+  lastPacketData.ntp_timestamp = GetNTPTime(fmtc->priv_data);
 
   return true;
 }

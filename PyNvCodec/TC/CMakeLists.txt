@@ -67,6 +67,8 @@ include_directories(${AVCODEC_INCLUDE_DIR})
 include_directories(${AVFORMAT_INCLUDE_DIR})
 include_directories(${AVUTIL_INCLUDE_DIR})
 include_directories(${VIDEO_CODEC_SDK_INCLUDE_DIR})
+# Include ffmpeg build headers to have private headers available as well
+include_directories(${FFMPEG_BUILD_HEADERS})
 
 #Do version stuff;
 set (TC_VERSION_MAJOR 1)

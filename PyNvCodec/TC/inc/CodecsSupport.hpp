@@ -21,6 +21,7 @@ struct PacketData {
   int64_t dts;
   uint64_t pos;
   uint64_t duration;
+  double ntp_timestamp;
 };
 
 struct VideoContext {

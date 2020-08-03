@@ -892,7 +892,8 @@ PYBIND11_MODULE(PyNvCodec, m) {
       .def_readonly("pts", &PacketData::pts)
       .def_readonly("dts", &PacketData::dts)
       .def_readonly("pos", &PacketData::pos)
-      .def_readonly("duration", &PacketData::duration);
+      .def_readonly("duration", &PacketData::duration)
+      .def_readonly("ntp_timestamp", &PacketData::ntp_timestamp);
 
   py::class_<PyNvDecoder>(m, "PyNvDecoder")
       .def(py::init<const string &, int, const map<string, string> &>())

@@ -96,6 +96,9 @@ public:
   void GetLastPacketData(PacketData &pktData);
 
   static int ReadPacket(void *opaque, uint8_t *pBuf, int nBuf);
+
+private:
+  double GetNTPTime(void* priv_data) const;
 };
 
 inline cudaVideoCodec FFmpeg2NvCodecId(AVCodecID id) {
