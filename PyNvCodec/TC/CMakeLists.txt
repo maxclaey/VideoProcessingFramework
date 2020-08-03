@@ -85,7 +85,8 @@ set (src_dir ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_subdirectory(${src_dir})
 
 #Add target;
-add_library(TC SHARED ${TC_HEADERS} ${TC_SOURCES})
+add_library(TC STATIC ${TC_HEADERS} ${TC_SOURCES})
+set_property(TARGET TC PROPERTY POSITION_INDEPENDENT_CODE ON)
 IF(UNIX)
 	set_property(TARGET TC PROPERTY CUDA_STANDARD 11)
 endif(UNIX)

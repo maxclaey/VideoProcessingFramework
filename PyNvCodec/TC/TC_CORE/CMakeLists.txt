@@ -34,7 +34,8 @@ configure_file(
 set (src_dir ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_subdirectory(${src_dir})
 
-add_library(TC_CORE SHARED ${TC_CORE_HEADERS} ${TC_CORE_SOURCES})
+add_library(TC_CORE STATIC ${TC_CORE_HEADERS} ${TC_CORE_SOURCES})
+set_property(TARGET TC_CORE PROPERTY POSITION_INDEPENDENT_CODE ON)
 include_directories(${TC_CORE_INC_PATH})
 
 set(TC_CORE_INC_PATH ${TC_CORE_INC_PATH} PARENT_SCOPE)
