@@ -46,7 +46,7 @@ private:
   NvencEncodeFrame(CUstream cuStream, CUcontext cuContext,
                    NvEncoderClInterface &cli_iface, NV_ENC_BUFFER_FORMAT format,
                    uint32_t width, uint32_t height, bool verbose);
-  static const uint32_t numInputs = 2U;
+  static const uint32_t numInputs = 3U;
   static const uint32_t numOutputs = 1U;
   struct NvencEncodeFrame_Impl *pImpl = nullptr;
 };
@@ -65,7 +65,8 @@ public:
   static NvdecDecodeFrame *Make(CUstream cuStream, CUcontext cuContext,
                                 cudaVideoCodec videoCodec,
                                 uint32_t decodedFramesPoolSize,
-                                uint32_t coded_width, uint32_t coded_height);
+                                uint32_t coded_width, uint32_t coded_height,
+                                Pixel_Format format);
 
 private:
   static const uint32_t numInputs = 1U;
@@ -74,7 +75,8 @@ private:
 
   NvdecDecodeFrame(CUstream cuStream, CUcontext cuContext,
                    cudaVideoCodec videoCodec, uint32_t decodedFramesPoolSize,
-                   uint32_t coded_width, uint32_t coded_height);
+                   uint32_t coded_width, uint32_t coded_height,
+                   Pixel_Format format);
 };
 
 class DllExport FfmpegDecodeFrame final : public Task {
@@ -154,8 +156,8 @@ public:
 
 private:
   DemuxFrame(const char *url, const char **ffmpeg_options, uint32_t opts_size);
-  static const uint32_t numInputs = 0U;
-  static const uint32_t numOutputs = 2U;
+  static const uint32_t numInputs = 1U;
+  static const uint32_t numOutputs = 3U;
   struct DemuxFrame_Impl *pImpl = nullptr;
 };
 

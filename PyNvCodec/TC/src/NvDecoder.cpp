@@ -44,6 +44,11 @@ static auto ThrowOnCudaError = [](CUresult res, int lineNum = -1) {
 
     const char *errDesc = nullptr;
     if (CUDA_SUCCESS != cuGetErrorString(res, &errDesc)) {
+      // Try CUDA runtime function then;
+      errDesc = cudaGetErrorString((cudaError_t)res);
+    }
+
+    if (!errDesc) {
       ss << "No error string available" << endl;
     } else {
       ss << errDesc << endl;
@@ -623,6 +628,10 @@ NvDecoder::~NvDecoder() {
 int NvDecoder::GetWidth() { return p_impl->m_nWidth; }
 
 int NvDecoder::GetHeight() { return p_impl->m_nLumaHeight; }
+
+int NvDecoder::GetChromaHeight() {
+  return p_impl->m_nChromaHeight * p_impl->m_nNumChromaPlanes;
+}
 
 int NvDecoder::GetFrameSize() {
   auto const num_pixels =

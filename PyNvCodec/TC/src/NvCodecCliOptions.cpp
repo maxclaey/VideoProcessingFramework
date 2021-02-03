@@ -17,6 +17,7 @@ extern "C" {
 #include "libavutil/dict.h"
 }
 
+#include "MemoryInterfaces.hpp"
 #include "NvCodecCLIOptions.h"
 #include <cstring>
 #include <iostream>
@@ -194,6 +195,16 @@ template <> int FromString(const string &value) {
   return ret;
 }
 
+template <> Pixel_Format FromString(const string &value) {
+  if ("NV12" == value) {
+    return NV12;
+  } else if ("YUV444" == value) {
+    return YUV444;
+  } else {
+    return UNDEFINED;
+  }
+}
+
 #if CHECK_API_VERSION(10, 0)
 template <> NV_ENC_TUNING_INFO FromString(const string &value) {
   if ("high_quality" == value) {
@@ -293,9 +304,14 @@ string ToString(const GUID &guid) {
     return "High YUV444";
   } else if (IsSameGuid(NV_ENC_H264_PROFILE_STEREO_GUID, guid)) {
     return "Stereo";
-  } else if (IsSameGuid(NV_ENC_H264_PROFILE_SVC_TEMPORAL_SCALABILTY, guid)) {
+  } 
+#if CHECK_API_VERSION(11, 0)
+#else
+  else if (IsSameGuid(NV_ENC_H264_PROFILE_SVC_TEMPORAL_SCALABILTY, guid)) {
     return "SVC";
-  } else if (IsSameGuid(NV_ENC_H264_PROFILE_PROGRESSIVE_HIGH_GUID, guid)) {
+  }
+#endif
+  else if (IsSameGuid(NV_ENC_H264_PROFILE_PROGRESSIVE_HIGH_GUID, guid)) {
     return "Progressive High";
   } else if (IsSameGuid(NV_ENC_H264_PROFILE_CONSTRAINED_HIGH_GUID, guid)) {
     return "Constrained high";
@@ -347,6 +363,34 @@ void PrintNvEncInitializeParams(const NV_ENC_INITIALIZE_PARAMS &params) {
   cout << " maxEncodeWidth:                  " << params.maxEncodeWidth << endl;
   cout << " maxEncodeHeight:                 " << params.maxEncodeHeight << endl
        << endl;
+}
+
+static void FpsToNumDen(const string &fps, uint32_t &num, uint32_t &den) {
+  // Convert a Float FPS to frameRateNum/frameRateDen which Video Codec SDK API
+  // supports. Force the decimal of Float FPS to 2 valid num if it is too long.
+  string::size_type xPos = fps.find('.');
+  if (xPos != string::npos) {
+    string sInt;
+    sInt = fps.substr(0, xPos);
+    string sDec;
+    sDec = fps.substr(xPos + 1);
+    uint32_t denLen;
+    denLen = sDec.length();
+    if (denLen > 2) {
+      denLen = 2; // force the decimal to 2 valid num.
+      sDec = fps.substr(xPos + 1, 2);
+    }
+    string sNum;
+    sNum = sInt + sDec;
+    den = 1;
+    for (int i = 0; i < denLen; i++) {
+      den *= 10;
+    }
+    num = FromString<uint32_t>(sNum);
+  } else {
+    num = FromString<uint32_t>(fps);
+    den = 1;
+  }
 }
 
 void NvEncoderClInterface::SetupInitParams(NV_ENC_INITIALIZE_PARAMS &params,
@@ -408,6 +452,13 @@ void NvEncoderClInterface::SetupInitParams(NV_ENC_INITIALIZE_PARAMS &params,
 #endif
   }
 
+  // Max resolution;
+  auto maxResolution = FindAttribute(options, "max_res");
+  uint32_t maxW = 0U, maxH = 0U;
+  if (!maxResolution.empty()) {
+    ParseResolution(maxResolution, maxW, maxH);
+  }
+
   // Resolution;
   auto resolution = FindAttribute(options, "s");
   if (!resolution.empty()) {
@@ -417,18 +468,27 @@ void NvEncoderClInterface::SetupInitParams(NV_ENC_INITIALIZE_PARAMS &params,
     params.encodeHeight = height;
     params.darWidth = params.encodeWidth;
     params.darHeight = params.encodeHeight;
-    params.maxEncodeWidth = params.encodeWidth;
-    params.maxEncodeHeight = params.encodeHeight;
+
+    /* Max resolution may be set to zero by hand to disable
+     * dynamic resolution change, that's why we only check
+     * if this option was set up by user and don't check the values;
+     */
+    if (maxResolution.empty()) {
+      params.maxEncodeWidth = params.encodeWidth;
+      params.maxEncodeHeight = params.encodeHeight;
+    } else {
+      params.maxEncodeWidth = maxW;
+      params.maxEncodeHeight = maxH;
+    }
   }
 
   // FPS;
   auto fps = FindAttribute(options, "fps");
   if (!fps.empty()) {
-    params.frameRateNum = FromString<uint32_t>(fps);
-    params.frameRateDen = 1;
+    FpsToNumDen(fps, params.frameRateNum, params.frameRateDen);
   }
 
-    // Async mode capability;
+  // Async mode capability;
 #if defined(_WIN32)
   if (!params.enableOutputInVidmem) {
     params.enableEncodeAsync = GetCapabilityValue(
@@ -526,9 +586,19 @@ void NvEncoderClInterface::SetupEncConfig(NV_ENC_CONFIG &config,
   if (IsSameGuid(NV_ENC_CODEC_H264_GUID, parent_params.codec_guid)) {
     SetupH264Config(config.encodeCodecConfig.h264Config, parent_params,
                     is_reconfigure, print_settings);
+
+    // Need to set up HIGH_444 profile for YUV444 input;
+    if (3 == config.encodeCodecConfig.h264Config.chromaFormatIDC) {
+      config.profileGUID = NV_ENC_H264_PROFILE_HIGH_444_GUID;
+    }
   } else if (IsSameGuid(NV_ENC_CODEC_HEVC_GUID, parent_params.codec_guid)) {
     SetupHEVCConfig(config.encodeCodecConfig.hevcConfig, parent_params,
                     is_reconfigure, print_settings);
+
+    // Need to set up FREXT profile for YUV444 input;
+    if (3 == config.encodeCodecConfig.hevcConfig.chromaFormatIDC) {
+      config.profileGUID = NV_ENC_HEVC_PROFILE_FREXT_GUID;
+    }
   } else {
     throw invalid_argument(
         "Invalid codec given. Choose between h.264 and hevc");
@@ -625,8 +695,8 @@ void PrintNvEncRcParams(const NV_ENC_RC_PARAMS &params) {
        << endl;
 #if CHECK_API_VERSION(10, 0)
   cout << " multiPass:                       " << params.multiPass << endl;
-  cout << " lowDelayKeyFrameScale:           " << (int)params.lowDelayKeyFrameScale
-       << endl;
+  cout << " lowDelayKeyFrameScale:           "
+       << (int)params.lowDelayKeyFrameScale << endl;
 #endif
   cout << " constQP:                         " << params.constQP.qpInterP
        << ", " << params.constQP.qpInterB << ", " << params.constQP.qpIntra
@@ -905,6 +975,15 @@ void NvEncoderClInterface::SetupH264Config(NV_ENC_CONFIG_H264 &config,
     config.chromaFormatIDC = 1;
   }
 
+  // Chroma format
+  auto format = FindAttribute(options, "fmt");
+  if (!format.empty()) {
+    auto pix_fmt = FromString<Pixel_Format>(format);
+    if (YUV444 == pix_fmt) {
+      config.chromaFormatIDC = 3;
+    }
+  }
+
   config.idrPeriod = parent_params.gop_length;
 
 #if CHECK_API_VERSION(9, 1)
@@ -1000,6 +1079,15 @@ void NvEncoderClInterface::SetupHEVCConfig(NV_ENC_CONFIG_HEVC &config,
   }
 
   config.idrPeriod = parent_params.gop_length;
+
+  // Chroma format
+  auto format = FindAttribute(options, "fmt");
+  if (!format.empty()) {
+    auto pix_fmt = FromString<Pixel_Format>(format);
+    if (YUV444 == pix_fmt) {
+      config.chromaFormatIDC = 3;
+    }
+  }
 
 #if CHECK_API_VERSION(9, 1)
   // IDR period;

@@ -25,12 +25,16 @@
 #include "NppCommon.hpp"
 #include "Tasks.hpp"
 
-#include "NvCodecUtils.h"
 #include "NvCodecCLIOptions.h"
+#include "NvCodecUtils.h"
 #include "NvEncoderCuda.h"
 
 #include "FFmpegDemuxer.h"
 #include "NvDecoder.h"
+
+extern "C" {
+#include <libavutil/pixdesc.h>
+}
 
 using namespace VPF;
 using namespace std;
@@ -140,10 +144,10 @@ TaskExecStatus NvencEncodeFrame::Execute() {
     auto &didFlush = pImpl->didFlush;
     auto &didEncode = pImpl->didEncode;
     auto &context = pImpl->context;
-    auto input = (Surface *)GetInput();
+    auto input = (Surface *)GetInput(0U);
     vector<vector<uint8_t>> encPackets;
 
-    if (input && NV12 == input->PixelFormat()) {
+    if (input) {
       auto &stream = pImpl->stream;
       const NvEncInputFrame *encoderInputFrame =
           pEncoderCuda->GetNextInputFrame();
@@ -166,11 +170,25 @@ TaskExecStatus NvencEncodeFrame::Execute() {
       }
       cudaStreamSynchronize(stream);
 
+      auto pSEI = (Buffer *)GetInput(2U);
+      NV_ENC_SEI_PAYLOAD payload = {0};
+      if (pSEI) {
+        payload.payloadSize = pSEI->GetRawMemSize();
+        // Unregistered user data for H.265 and H.264 both;
+        payload.payloadType = 5;
+        payload.payload = pSEI->GetDataAs<uint8_t>();
+      }
+
+      auto const seiNumber = pSEI ? 1U : 0U;
+      auto pPayload = pSEI ? &payload : nullptr;
+
       auto sync = GetInput(1U);
       if (sync) {
-        pEncoderCuda->EncodeFrame(encPackets, nullptr, false);
+        pEncoderCuda->EncodeFrame(encPackets, nullptr, false, seiNumber,
+                                  pPayload);
       } else {
-        pEncoderCuda->EncodeFrame(encPackets);
+        pEncoderCuda->EncodeFrame(encPackets, nullptr, true, seiNumber,
+                                  pPayload);
       }
       didEncode = true;
     } else if (didEncode && !didFlush) {
@@ -197,7 +215,8 @@ TaskExecStatus NvencEncodeFrame::Execute() {
     }
 
     return TASK_EXEC_SUCCESS;
-  } catch (...) {
+  } catch (exception &e) {
+    cerr << e.what() << endl;
     return TASK_EXEC_FAIL;
   }
 }
@@ -205,7 +224,7 @@ TaskExecStatus NvencEncodeFrame::Execute() {
 namespace VPF {
 struct NvdecDecodeFrame_Impl {
   NvDecoder nvDecoder;
-  SurfaceNV12 *pLastSurface = nullptr;
+  Surface *pLastSurface = nullptr;
   CUstream stream = 0;
   CUcontext context = nullptr;
   bool didDecode = false;
@@ -215,10 +234,10 @@ struct NvdecDecodeFrame_Impl {
   NvdecDecodeFrame_Impl &operator=(const NvdecDecodeFrame_Impl &other) = delete;
 
   NvdecDecodeFrame_Impl(CUstream cuStream, CUcontext cuContext,
-                        cudaVideoCodec videoCodec)
+                        cudaVideoCodec videoCodec, Pixel_Format format)
       : stream(cuStream), context(cuContext),
         nvDecoder(cuStream, cuContext, videoCodec) {
-    pLastSurface = new SurfaceNV12();
+    pLastSurface = Surface::Make(format);
   }
 
   ~NvdecDecodeFrame_Impl() { delete pLastSurface; }
@@ -229,20 +248,23 @@ NvdecDecodeFrame *NvdecDecodeFrame::Make(CUstream cuStream, CUcontext cuContext,
                                          cudaVideoCodec videoCodec,
                                          uint32_t decodedFramesPoolSize,
                                          uint32_t coded_width,
-                                         uint32_t coded_height) {
+                                         uint32_t coded_height,
+                                         Pixel_Format format) {
   return new NvdecDecodeFrame(cuStream, cuContext, videoCodec,
-                              decodedFramesPoolSize, coded_width, coded_height);
+                              decodedFramesPoolSize, coded_width, coded_height,
+                              format);
 }
 
 NvdecDecodeFrame::NvdecDecodeFrame(CUstream cuStream, CUcontext cuContext,
                                    cudaVideoCodec videoCodec,
                                    uint32_t decodedFramesPoolSize,
-                                   uint32_t coded_width, uint32_t coded_height)
+                                   uint32_t coded_width, uint32_t coded_height,
+                                   Pixel_Format format)
     :
 
       Task("NvdecDecodeFrame", NvdecDecodeFrame::numInputs,
            NvdecDecodeFrame::numOutputs) {
-  pImpl = new NvdecDecodeFrame_Impl(cuStream, cuContext, videoCodec);
+  pImpl = new NvdecDecodeFrame_Impl(cuStream, cuContext, videoCodec, format);
 }
 
 NvdecDecodeFrame::~NvdecDecodeFrame() {
@@ -284,11 +306,11 @@ TaskExecStatus NvdecDecodeFrame::Execute() {
     decoder.UnlockSurface(lastSurface);
 
     auto rawW = decoder.GetWidth();
-    auto rawH = decoder.GetHeight() * 3 / 2;
+    auto rawH = decoder.GetHeight() + decoder.GetChromaHeight();
     auto rawP = decoder.GetDeviceFramePitch();
 
     SurfacePlane tmpPlane(rawW, rawH, rawP, sizeof(uint8_t), surface);
-    pImpl->pLastSurface->Update(tmpPlane);
+    pImpl->pLastSurface->Update(&tmpPlane, 1);
     SetOutput(pImpl->pLastSurface, 0U);
     return TASK_EXEC_SUCCESS;
   }
@@ -313,9 +335,12 @@ static size_t GetElemSize(Pixel_Format format) {
 
   switch (format) {
   case RGB_PLANAR:
+  case YUV444:
   case YUV420:
+  case YCBCR:
   case NV12:
   case RGB:
+  case BGR:
   case Y:
     return sizeof(uint8_t);
   default:
@@ -422,9 +447,10 @@ struct CudaDownloadSurface_Impl {
 
     auto bufferSize = _width * _height * GetElemSize(_pix_fmt);
 
-    if (YUV420 == _pix_fmt || NV12 == _pix_fmt) {
+    if (YUV420 == _pix_fmt || NV12 == _pix_fmt || YCBCR == _pix_fmt) {
       bufferSize = bufferSize * 3U / 2U;
-    } else if (RGB == _pix_fmt || RGB_PLANAR == _pix_fmt) {
+    } else if (RGB == _pix_fmt || RGB_PLANAR == _pix_fmt || BGR == _pix_fmt ||
+               YUV444 == _pix_fmt) {
       bufferSize = bufferSize * 3U;
     } else if (Y == _pix_fmt) {
     } else {
@@ -509,6 +535,7 @@ struct DemuxFrame_Impl {
   FFmpegDemuxer demuxer;
   Buffer *pElementaryVideo;
   Buffer *pMuxingParams;
+  Buffer *pSei;
 
   DemuxFrame_Impl() = delete;
   DemuxFrame_Impl(const DemuxFrame_Impl &other) = delete;
@@ -519,11 +546,13 @@ struct DemuxFrame_Impl {
       : demuxer(url.c_str(), ffmpeg_options) {
     pElementaryVideo = Buffer::MakeOwnMem(0U);
     pMuxingParams = Buffer::MakeOwnMem(sizeof(MuxingParams));
+    pSei = Buffer::MakeOwnMem(0U);
   }
 
   ~DemuxFrame_Impl() {
     delete pElementaryVideo;
     delete pMuxingParams;
+    delete pSei;
   }
 };
 } // namespace VPF
@@ -561,7 +590,11 @@ TaskExecStatus DemuxFrame::Execute() {
   auto &videoBytes = pImpl->videoBytes;
   auto &demuxer = pImpl->demuxer;
 
-  if (!demuxer.Demux(pVideo, videoBytes)) {
+  uint8_t *pSEI = nullptr;
+  size_t seiBytes = 0U;
+  bool needSEI = (nullptr != GetInput(0U));
+
+  if (!demuxer.Demux(pVideo, videoBytes, needSEI ? &pSEI : nullptr, &seiBytes)) {
     return TASK_EXEC_FAIL;
   }
 
@@ -575,6 +608,11 @@ TaskExecStatus DemuxFrame::Execute() {
     SetOutput(pImpl->pMuxingParams, 1U);
   }
 
+  if (pSEI) {
+    pImpl->pSei->Update(seiBytes, pSEI);
+    SetOutput(pImpl->pSei, 2U);
+  }
+
   return TASK_EXEC_SUCCESS;
 }
 
@@ -585,7 +623,24 @@ void DemuxFrame::GetParams(MuxingParams &params) const {
   params.videoContext.timeBase = pImpl->demuxer.GetTimebase();
   params.videoContext.streamIndex = pImpl->demuxer.GetVideoStreamIndex();
   params.videoContext.codec = FFmpeg2NvCodecId(pImpl->demuxer.GetVideoCodec());
-  params.videoContext.format = NV12;
+
+  switch (pImpl->demuxer.GetPixelFormat()) {
+  case AV_PIX_FMT_YUVJ420P:
+  case AV_PIX_FMT_YUV420P:
+  case AV_PIX_FMT_NV12:
+    params.videoContext.format = NV12;
+    break;
+  case AV_PIX_FMT_YUV444P:
+    params.videoContext.format = YUV444;
+    break;
+  default:
+    stringstream ss;
+    ss << "Unsupported FFmpeg pixel format: "
+       << av_get_pix_fmt_name(pImpl->demuxer.GetPixelFormat()) << endl;
+    throw invalid_argument(ss.str());
+    params.videoContext.format = UNDEFINED;
+    break;
+  }
 }
 
 namespace VPF {
@@ -783,14 +838,14 @@ struct ResizeSurface_Impl {
   virtual TaskExecStatus Execute(Surface &source) = 0;
 };
 
-struct NppResizeSurfaceRGB_Impl final : ResizeSurface_Impl {
-  NppResizeSurfaceRGB_Impl(uint32_t width, uint32_t height, CUcontext ctx,
-                           CUstream str)
-      : ResizeSurface_Impl(width, height, RGB, ctx, str) {
-    pSurface = Surface::Make(RGB, width, height, ctx);
+struct NppResizeSurfacePacked3C_Impl final : ResizeSurface_Impl {
+  NppResizeSurfacePacked3C_Impl(uint32_t width, uint32_t height, CUcontext ctx,
+                                CUstream str, Pixel_Format format)
+      : ResizeSurface_Impl(width, height, format, ctx, str) {
+    pSurface = Surface::Make(format, width, height, ctx);
   }
 
-  ~NppResizeSurfaceRGB_Impl() { delete pSurface; }
+  ~NppResizeSurfacePacked3C_Impl() { delete pSurface; }
 
   TaskExecStatus Execute(Surface &source) {
 
@@ -826,6 +881,8 @@ struct NppResizeSurfaceRGB_Impl final : ResizeSurface_Impl {
                                      pDst, nDstStep, oDstSize, oDstRectROI,
                                      eInterpolation, nppCtx);
     if (NPP_NO_ERROR != ret) {
+      cerr << "Can't resize 3-channel packed image. Error code: " << ret
+           << endl;
       return TASK_EXEC_FAIL;
     }
 
@@ -836,18 +893,21 @@ struct NppResizeSurfaceRGB_Impl final : ResizeSurface_Impl {
   CUcontext ctx;
 };
 
-struct NppResizeSurfaceYUV420_Impl final : ResizeSurface_Impl {
-  NppResizeSurfaceYUV420_Impl(uint32_t width, uint32_t height, CUcontext ctx,
-                              CUstream str)
-      : ResizeSurface_Impl(width, height, YUV420, ctx, str) {
-    pSurface = Surface::Make(YUV420, width, height, ctx);
+// Resize planar 8 bit surface (YUV420, YCbCr420);
+struct NppResizeSurfacePlanar420_Impl final : ResizeSurface_Impl {
+  NppResizeSurfacePlanar420_Impl(uint32_t width, uint32_t height, CUcontext ctx,
+                                 CUstream str, Pixel_Format format)
+      : ResizeSurface_Impl(width, height, format, ctx, str) {
+    pSurface = Surface::Make(format, width, height, ctx);
   }
 
-  ~NppResizeSurfaceYUV420_Impl() { delete pSurface; }
+  ~NppResizeSurfacePlanar420_Impl() { delete pSurface; }
 
   TaskExecStatus Execute(Surface &source) {
 
     if (pSurface->PixelFormat() != source.PixelFormat()) {
+      cerr << "Actual pixel format is " << source.PixelFormat() << endl;
+      cerr << "Expected input format is " << pSurface->PixelFormat() << endl;
       return TaskExecStatus::TASK_EXEC_FAIL;
     }
 
@@ -880,6 +940,7 @@ struct NppResizeSurfaceYUV420_Impl final : ResizeSurface_Impl {
                                        pDst, nDstStep, oDstSize, oDstRectROI,
                                        eInterpolation, nppCtx);
       if (NPP_NO_ERROR != ret) {
+        cerr << "NPP error with code " << ret << endl;
         return TASK_EXEC_FAIL;
       }
     }
@@ -894,10 +955,10 @@ ResizeSurface::ResizeSurface(uint32_t width, uint32_t height,
                              Pixel_Format format, CUcontext ctx, CUstream str)
     : Task("NppResizeSurface", ResizeSurface::numInputs,
            ResizeSurface::numOutputs) {
-  if (RGB == format) {
-    pImpl = new NppResizeSurfaceRGB_Impl(width, height, ctx, str);
-  } else if (YUV420 == format) {
-    pImpl = new NppResizeSurfaceYUV420_Impl(width, height, ctx, str);
+  if (RGB == format || BGR == format) {
+    pImpl = new NppResizeSurfacePacked3C_Impl(width, height, ctx, str, format);
+  } else if (YUV420 == format || YCBCR == format) {
+    pImpl = new NppResizeSurfacePlanar420_Impl(width, height, ctx, str, format);
   } else {
     stringstream ss;
     ss << __FUNCTION__;
